@@ -533,6 +533,7 @@ const GC = {
 };
 
 let chs=[], curIdx=-1, curGrp='All', hlsObj=null, retUrl='';
+let skipAttempts=new Set();
 
 /* helpers */
 const $=id=>document.getElementById(id);
@@ -688,9 +689,10 @@ function buildReco(){
 }
 
 /* play channel */
-function playCh(idx){
+function playCh(idx,auto){
   const ch=chs[idx];
   if(!ch)return;
+  if(!auto)skipAttempts=new Set();
   curIdx=idx; retUrl=ch.url;
   const _tp=$('tapPlay');if(_tp)_tp.style.display='none';
 
@@ -716,10 +718,18 @@ function playCh(idx){
 }
 
 /* stream */
+let loadToken=0, watchdogId=null, netRetryCount=0;
 function loadStream(url){
   const v=$('vid');
   if(hlsObj){hlsObj.destroy();hlsObj=null;}
   v.pause();v.removeAttribute('src');v.load();
+
+  clearTimeout(watchdogId);
+  netRetryCount=0;
+  const myToken=++loadToken;
+  watchdogId=setTimeout(()=>{
+    if(myToken===loadToken)autoSkipOnError();
+  },12000);
 
   if(Hls.isSupported()){
     hlsObj=new Hls({enableWorker:true,lowLatencyMode:true,
@@ -731,36 +741,57 @@ function loadStream(url){
       v.muted=false;
       const p=v.play();
       if(p!==undefined){
-        p.then(()=>{fadeOv();}).catch(()=>{
-          fadeOv();
+        p.then(()=>{fadeOv(myToken);}).catch(()=>{
+          fadeOv(myToken);
           const tp=$('tapPlay');
           tp.style.display='flex';
           tp.onclick=()=>{v.play().catch(()=>{});tp.style.display='none';};
         });
-      }else{fadeOv();}
+      }else{fadeOv(myToken);}
     });
     hlsObj.on(Hls.Events.ERROR,(_,d)=>{
-      if(d.fatal){d.type===Hls.ErrorTypes.NETWORK_ERROR?hlsObj.startLoad():showErr();}
+      if(myToken!==loadToken)return;
+      if(d.fatal){
+        if(d.type===Hls.ErrorTypes.NETWORK_ERROR){
+          netRetryCount++;
+          netRetryCount<=3?hlsObj.startLoad():autoSkipOnError();
+        }else{autoSkipOnError();}
+      }
     });
   }else if(v.canPlayType('application/vnd.apple.mpegurl')){
     v.src=url;
     v.addEventListener('loadedmetadata',()=>{
       const p=v.play();
       if(p!==undefined){
-        p.then(()=>{fadeOv();}).catch(()=>{
-          fadeOv();
+        p.then(()=>{fadeOv(myToken);}).catch(()=>{
+          fadeOv(myToken);
           const tp=$('tapPlay');
           tp.style.display='flex';
           tp.onclick=()=>{v.play().catch(()=>{});tp.style.display='none';};
         });
-      }else{fadeOv();}
+      }else{fadeOv(myToken);}
     },{once:true});
-    v.addEventListener('error',()=>showErr(),{once:true});
-  }else{showErr();}
+    v.addEventListener('error',()=>{if(myToken===loadToken)autoSkipOnError();},{once:true});
+  }else{autoSkipOnError();}
 }
 
-function fadeOv(){setTimeout(()=>{$('pov').classList.add('gone');$('pSpin').style.display='none';},600);}
-function showErr(){$('pov').classList.add('gone');$('perr').style.display='flex';}
+function fadeOv(token){
+  if(token!==undefined&&token!==loadToken)return;
+  clearTimeout(watchdogId);
+  setTimeout(()=>{$('pov').classList.add('gone');$('pSpin').style.display='none';},600);
+}
+function showErr(){clearTimeout(watchdogId);$('pov').classList.add('gone');$('perr').style.display='flex';}
+
+/* auto-skip to next channel on load failure; stops once one plays or all are exhausted */
+function autoSkipOnError(){
+  clearTimeout(watchdogId);
+  if(curIdx<0||!chs.length)return showErr();
+  skipAttempts.add(curIdx);
+  if(skipAttempts.size>=chs.length){showErr();return;}
+  let n=(curIdx+1)%chs.length;
+  while(skipAttempts.has(n))n=(n+1)%chs.length;
+  playCh(n,true);
+}
 
 /* nav */
 function getIdx(){
